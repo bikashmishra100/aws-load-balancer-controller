@@ -133,7 +133,7 @@ func (c *elbv2Client) RegisterTargetsWithContext(ctx context.Context, input *ela
 	if err != nil {
 		return nil, err
 	}
-	return client.RegisterTargets(ctx, input)
+	return client.RegisterTargets(ctx, input, regionOptFromContext(ctx))
 }
 
 func (c *elbv2Client) DeregisterTargetsWithContext(ctx context.Context, input *elasticloadbalancingv2.DeregisterTargetsInput) (*elasticloadbalancingv2.DeregisterTargetsOutput, error) {
@@ -141,7 +141,7 @@ func (c *elbv2Client) DeregisterTargetsWithContext(ctx context.Context, input *e
 	if err != nil {
 		return nil, err
 	}
-	return client.DeregisterTargets(ctx, input)
+	return client.DeregisterTargets(ctx, input, regionOptFromContext(ctx))
 }
 
 func (c *elbv2Client) DescribeTrustStoresWithContext(ctx context.Context, input *elasticloadbalancingv2.DescribeTrustStoresInput) (*elasticloadbalancingv2.DescribeTrustStoresOutput, error) {
@@ -207,7 +207,7 @@ func (c *elbv2Client) DescribeTargetHealthWithContext(ctx context.Context, input
 	if err != nil {
 		return nil, err
 	}
-	return client.DescribeTargetHealth(ctx, input)
+	return client.DescribeTargetHealth(ctx, input, regionOptFromContext(ctx))
 }
 
 func (c *elbv2Client) DescribeTargetGroupsWithContext(ctx context.Context, input *elasticloadbalancingv2.DescribeTargetGroupsInput) (*elasticloadbalancingv2.DescribeTargetGroupsOutput, error) {
@@ -215,7 +215,7 @@ func (c *elbv2Client) DescribeTargetGroupsWithContext(ctx context.Context, input
 	if err != nil {
 		return nil, err
 	}
-	return client.DescribeTargetGroups(ctx, input)
+	return client.DescribeTargetGroups(ctx, input, regionOptFromContext(ctx))
 }
 
 func (c *elbv2Client) DeleteTargetGroupWithContext(ctx context.Context, input *elasticloadbalancingv2.DeleteTargetGroupInput) (*elasticloadbalancingv2.DeleteTargetGroupOutput, error) {
@@ -495,6 +495,35 @@ func (c *elbv2Client) ModifyIPPoolsWithContext(ctx context.Context, input *elast
 		return nil, err
 	}
 	return client.ModifyIpPools(ctx, input)
+}
+
+// regionKey is the context key for per-call ELBv2 region overrides.
+type regionKey struct{}
+
+// WithRegion returns a context that carries a region override applied to
+// ELBv2 target-group API calls (Register/Deregister/DescribeTargetHealth/DescribeTargetGroups).
+// Passing an empty string is a no-op.
+func WithRegion(ctx context.Context, region string) context.Context {
+	if region == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, regionKey{}, region)
+}
+
+// RegionFromContext returns the region stored in ctx by WithRegion, or "" if none was set.
+func RegionFromContext(ctx context.Context) string {
+	r, _ := ctx.Value(regionKey{}).(string)
+	return r
+}
+
+// regionOptFromContext returns a per-call SDK option that injects the region stored
+// in ctx, if any.  It is a no-op when no region was set.
+func regionOptFromContext(ctx context.Context) func(*elasticloadbalancingv2.Options) {
+	return func(o *elasticloadbalancingv2.Options) {
+		if r, _ := ctx.Value(regionKey{}).(string); r != "" {
+			o.Region = r
+		}
+	}
 }
 
 func (c *elbv2Client) getClient(ctx context.Context, operation string) (*elasticloadbalancingv2.Client, error) {

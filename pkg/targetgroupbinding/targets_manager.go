@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awsarn "github.com/aws/aws-sdk-go-v2/aws/arn"
 	elbv2sdk "github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2"
 	elbv2types "github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2/types"
 	"github.com/go-logr/logr"
@@ -92,6 +93,7 @@ func (m *cachedTargetsManager) RegisterTargets(ctx context.Context, tgb *elbv2ap
 			"arn", tgARN,
 			"targets", targetsChunk)
 
+		ctx := services.WithRegion(ctx, resolveTargetGroupRegion(tgb))
 		clientToUse, err := m.elbv2Client.AssumeRole(ctx, tgb.Spec.IamRoleArnToAssume, tgb.Spec.AssumeRoleExternalId)
 		if err != nil {
 			return err
@@ -120,6 +122,7 @@ func (m *cachedTargetsManager) DeregisterTargets(ctx context.Context, tgb *elbv2
 		m.logger.Info("deRegistering targets",
 			"arn", tgARN,
 			"targets", targetsChunk)
+		ctx := services.WithRegion(ctx, resolveTargetGroupRegion(tgb))
 		clientToUse, err := m.elbv2Client.AssumeRole(ctx, tgb.Spec.IamRoleArnToAssume, tgb.Spec.AssumeRoleExternalId)
 		if err != nil {
 			return err
@@ -213,6 +216,7 @@ func (m *cachedTargetsManager) listTargetsFromAWS(ctx context.Context, tgb *elbv
 		TargetGroupArn: aws.String(tgARN),
 		Targets:        targetByIdPort(targets),
 	}
+	ctx = services.WithRegion(ctx, resolveTargetGroupRegion(tgb))
 	clientToUse, err := m.elbv2Client.AssumeRole(ctx, tgb.Spec.IamRoleArnToAssume, tgb.Spec.AssumeRoleExternalId)
 	if err != nil {
 		return nil, err
@@ -289,6 +293,20 @@ func (m *cachedTargetsManager) recordSuccessfulDeregisterTargetsOperation(tgARN 
 			delete(targetsByUniqueID, cachedTargetUniqueID)
 		}
 	}
+}
+
+// resolveTargetGroupRegion returns the effective AWS region for a TGB's target group.
+// Priority: spec.region > region parsed from ARN > controller region.
+func resolveTargetGroupRegion(tgb *elbv2api.TargetGroupBinding) string {
+	if tgb.Spec.Region != "" {
+		return tgb.Spec.Region
+	}
+	if tgb.Spec.TargetGroupARN != "" {
+		if parsed, err := awsarn.Parse(tgb.Spec.TargetGroupARN); err == nil && parsed.Region != "" {
+			return parsed.Region
+		}
+	}
+	return ""
 }
 
 // chunkTargetDescriptions will split slice of TargetDescription into chunks

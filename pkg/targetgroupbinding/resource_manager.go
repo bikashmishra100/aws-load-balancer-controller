@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/cache"
 
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
+	awsarn "github.com/aws/aws-sdk-go-v2/aws/arn"
 	elbv2types "github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2/types"
 	"github.com/go-logr/logr"
 	"github.com/pkg/errors"
@@ -46,7 +47,7 @@ type ResourceManager interface {
 func NewDefaultResourceManager(k8sClient client.Client, elbv2Client services.ELBV2,
 	podInfoRepo k8s.PodInfoRepo, networkingManager networking.NetworkingManager,
 	vpcInfoProvider networking.VPCInfoProvider, multiClusterManager MultiClusterManager, metricsCollector lbcmetrics.MetricCollector,
-	vpcID string, failOpenEnabled bool, endpointSliceEnabled bool,
+	vpcID string, clusterRegion string, failOpenEnabled bool, endpointSliceEnabled bool,
 	eventRecorder record.EventRecorder, logger logr.Logger, maxTargetsPerTargetGroup int, requeueDuration time.Duration) *defaultResourceManager {
 
 	targetsManager := NewCachedTargetsManager(elbv2Client, logger)
@@ -59,6 +60,7 @@ func NewDefaultResourceManager(k8sClient client.Client, elbv2Client services.ELB
 		eventRecorder:            eventRecorder,
 		logger:                   logger,
 		vpcID:                    vpcID,
+		clusterRegion:            clusterRegion,
 		vpcInfoProvider:          vpcInfoProvider,
 		podInfoRepo:              podInfoRepo,
 		maxTargetsPerTargetGroup: maxTargetsPerTargetGroup,
@@ -94,6 +96,7 @@ type defaultResourceManager struct {
 	multiClusterManager      MultiClusterManager
 	metricsCollector         lbcmetrics.MetricCollector
 	vpcID                    string
+	clusterRegion            string
 
 	invalidVpcCache      *cache.Expiring
 	invalidVpcCacheTTL   time.Duration
@@ -584,7 +587,14 @@ func (m *defaultResourceManager) registerPodEndpoints(ctx context.Context, tgb *
 			"registering endpoints using the targetGroup's vpcID %s which is different from the cluster's vpcID %s", tgb.Spec.VpcID, m.vpcID))
 	}
 
-	overrideAzFn, err := m.generateOverrideAzFn(ctx, vpcID, tgb.Spec.IamRoleArnToAssume)
+	effectiveRegion := tgb.Spec.Region
+	if effectiveRegion == "" {
+		if parsed, err := awsarn.Parse(tgb.Spec.TargetGroupARN); err == nil && parsed.Region != "" {
+			effectiveRegion = parsed.Region
+		}
+	}
+	isCrossRegion := m.clusterRegion != "" && effectiveRegion != "" && effectiveRegion != m.clusterRegion
+	overrideAzFn, err := m.generateOverrideAzFn(ctx, vpcID, tgb.Spec.IamRoleArnToAssume, isCrossRegion)
 	if err != nil {
 		return err
 	}
@@ -594,7 +604,7 @@ func (m *defaultResourceManager) registerPodEndpoints(ctx context.Context, tgb *
 	_, needsPodAZ := m.needsPodAZCache.Get(tgbKey)
 	m.needsPodAZCacheMutex.RUnlock()
 
-	sdkTargets, err := m.prepareRegistrationCall(ctx, endpoints, tgb, overrideAzFn, needsPodAZ)
+	sdkTargets, err := m.prepareRegistrationCall(ctx, endpoints, tgb, overrideAzFn, needsPodAZ, isCrossRegion)
 	if err != nil {
 		return err
 	}
@@ -605,7 +615,7 @@ func (m *defaultResourceManager) registerPodEndpoints(ctx context.Context, tgb *
 		m.needsPodAZCache.Set(tgbKey, true, m.needsPodAZCacheTTL)
 		m.needsPodAZCacheMutex.Unlock()
 
-		sdkTargets, err = m.prepareRegistrationCall(ctx, endpoints, tgb, overrideAzFn, true)
+		sdkTargets, err = m.prepareRegistrationCall(ctx, endpoints, tgb, overrideAzFn, true, isCrossRegion)
 		if err != nil {
 			return err
 		}
@@ -619,8 +629,9 @@ func (m *defaultResourceManager) registerPodEndpoints(ctx context.Context, tgb *
 	return err
 }
 
-func (m *defaultResourceManager) prepareRegistrationCall(ctx context.Context, endpoints []backend.PodEndpoint, tgb *elbv2api.TargetGroupBinding, doAzOverride func(addr netip.Addr) bool, usePodAZ bool) ([]elbv2types.TargetDescription, error) {
-	usingCrossAccount := tgb.Spec.IamRoleArnToAssume != ""
+func (m *defaultResourceManager) prepareRegistrationCall(ctx context.Context, endpoints []backend.PodEndpoint, tgb *elbv2api.TargetGroupBinding, doAzOverride func(addr netip.Addr) bool, usePodAZ bool, isCrossRegion bool) ([]elbv2types.TargetDescription, error) {
+	isCrossAccount := tgb.Spec.IamRoleArnToAssume != ""
+	isCrossBoundary := isCrossAccount || isCrossRegion
 
 	sdkTargets := make([]elbv2types.TargetDescription, 0, len(endpoints))
 	for _, endpoint := range endpoints {
@@ -633,7 +644,7 @@ func (m *defaultResourceManager) prepareRegistrationCall(ctx context.Context, en
 			return sdkTargets, err
 		}
 		if doAzOverride(podIP) {
-			if usePodAZ && !usingCrossAccount {
+			if usePodAZ && !isCrossBoundary {
 				az, err := m.getPodAvailabilityZone(ctx, endpoint.Pod)
 				if err != nil {
 					return sdkTargets, err
@@ -694,7 +705,14 @@ func (m *defaultResourceManager) updateTGBCheckPoint(ctx context.Context, tgb *e
 	return nil
 }
 
-func (m *defaultResourceManager) generateOverrideAzFn(ctx context.Context, vpcID string, assumeRole string) (func(addr netip.Addr) bool, error) {
+func (m *defaultResourceManager) generateOverrideAzFn(ctx context.Context, vpcID string, assumeRole string, isCrossRegion bool) (func(addr netip.Addr) bool, error) {
+	// Cross-region always requires AZ override to "all".
+	if isCrossRegion {
+		return func(addr netip.Addr) bool {
+			return true
+		}, nil
+	}
+
 	// Cross-Account is configured by assuming a role.
 	usingCrossAccount := assumeRole != ""
 

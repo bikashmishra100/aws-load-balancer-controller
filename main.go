@@ -208,7 +208,7 @@ func main() {
 
 	tgbResManager := targetgroupbinding.NewDefaultResourceManager(mgr.GetClient(), cloud.ELBV2(),
 		podInfoRepo, networkingManager, vpcInfoProvider, multiClusterManager, lbcMetricsCollector,
-		cloud.VpcID(), controllerCFG.FeatureGates.Enabled(config.EndpointsFailOpen), controllerCFG.EnableEndpointSlices,
+		cloud.VpcID(), cloud.Region(), controllerCFG.FeatureGates.Enabled(config.EndpointsFailOpen), controllerCFG.EnableEndpointSlices,
 		mgr.GetEventRecorderFor("targetGroupBinding"), ctrl.Log, controllerCFG.MaxTargetsPerTargetGroup, controllerCFG.TargetGroupBindingRequeueDuration)
 	backendSGProvider := networking.NewBackendSGProvider(controllerCFG.ClusterName, controllerCFG.BackendSecurityGroup,
 		cloud.VpcID(), cloud.EC2(), mgr.GetClient(), controllerCFG.DefaultTags, nlbGatewayEnabled || albGatewayEnabled,

@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/aws-load-balancer-controller/v3/pkg/networking"
 
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
+	awsarn "github.com/aws/aws-sdk-go-v2/aws/arn"
 	"github.com/go-logr/logr"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -691,7 +692,7 @@ func Test_defaultResourceManager_GenerateOverrideAzFn(t *testing.T) {
 				vpcInfoProvider: vpcInfoProvider,
 			}
 
-			returnedFn, err := m.generateOverrideAzFn(context.Background(), vpcId, tc.assumeRole)
+			returnedFn, err := m.generateOverrideAzFn(context.Background(), vpcId, tc.assumeRole, false)
 
 			if tc.expectErr {
 				assert.Error(t, err)
@@ -702,6 +703,97 @@ func Test_defaultResourceManager_GenerateOverrideAzFn(t *testing.T) {
 			for _, iptc := range tc.ipTestCases {
 				assert.Equal(t, iptc.result, returnedFn(iptc.ip), iptc.ip)
 			}
+		})
+	}
+}
+
+func Test_defaultResourceManager_isCrossRegion(t *testing.T) {
+	testCases := []struct {
+		name          string
+		clusterRegion string
+		tgb           *elbv2api.TargetGroupBinding
+		want          bool
+	}{
+		{
+			name:          "no spec.region, no ARN region - not cross-region",
+			clusterRegion: "us-east-1",
+			tgb: &elbv2api.TargetGroupBinding{
+				Spec: elbv2api.TargetGroupBindingSpec{
+					TargetGroupARN: "tg-1",
+				},
+			},
+			want: false,
+		},
+		{
+			name:          "spec.region same as cluster region - not cross-region",
+			clusterRegion: "us-east-1",
+			tgb: &elbv2api.TargetGroupBinding{
+				Spec: elbv2api.TargetGroupBindingSpec{
+					TargetGroupARN: "arn:aws:elasticloadbalancing:us-east-1:123456789012:targetgroup/my-tg/abc123",
+					Region:         "us-east-1",
+				},
+			},
+			want: false,
+		},
+		{
+			name:          "spec.region different from cluster region - cross-region",
+			clusterRegion: "us-east-1",
+			tgb: &elbv2api.TargetGroupBinding{
+				Spec: elbv2api.TargetGroupBindingSpec{
+					TargetGroupARN: "arn:aws:elasticloadbalancing:us-west-2:123456789012:targetgroup/my-tg/abc123",
+					Region:         "us-west-2",
+				},
+			},
+			want: true,
+		},
+		{
+			name:          "no spec.region, ARN region matches cluster - not cross-region",
+			clusterRegion: "us-east-1",
+			tgb: &elbv2api.TargetGroupBinding{
+				Spec: elbv2api.TargetGroupBindingSpec{
+					TargetGroupARN: "arn:aws:elasticloadbalancing:us-east-1:123456789012:targetgroup/my-tg/abc123",
+				},
+			},
+			want: false,
+		},
+		{
+			name:          "no spec.region, ARN region differs from cluster - cross-region",
+			clusterRegion: "us-east-1",
+			tgb: &elbv2api.TargetGroupBinding{
+				Spec: elbv2api.TargetGroupBindingSpec{
+					TargetGroupARN: "arn:aws:elasticloadbalancing:us-west-2:123456789012:targetgroup/my-tg/abc123",
+				},
+			},
+			want: true,
+		},
+		{
+			name:          "clusterRegion unset - not cross-region regardless of spec",
+			clusterRegion: "",
+			tgb: &elbv2api.TargetGroupBinding{
+				Spec: elbv2api.TargetGroupBindingSpec{
+					TargetGroupARN: "arn:aws:elasticloadbalancing:us-west-2:123456789012:targetgroup/my-tg/abc123",
+					Region:         "us-west-2",
+				},
+			},
+			want: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &defaultResourceManager{
+				clusterRegion: tc.clusterRegion,
+			}
+
+			effectiveRegion := tc.tgb.Spec.Region
+			if effectiveRegion == "" {
+				if parsed, err := awsarn.Parse(tc.tgb.Spec.TargetGroupARN); err == nil && parsed.Region != "" {
+					effectiveRegion = parsed.Region
+				}
+			}
+			isCrossRegion := m.clusterRegion != "" && effectiveRegion != "" && effectiveRegion != m.clusterRegion
+
+			assert.Equal(t, tc.want, isCrossRegion)
 		})
 	}
 }
@@ -1265,7 +1357,7 @@ func Test_defaultResourceManager_prepareRegistrationCall(t *testing.T) {
 			}
 
 			ctx := context.Background()
-			got, err := m.prepareRegistrationCall(ctx, tt.endpoints, tt.tgb, tt.doAzOverride, tt.usePodAZ)
+			got, err := m.prepareRegistrationCall(ctx, tt.endpoints, tt.tgb, tt.doAzOverride, tt.usePodAZ, false)
 
 			if tt.wantErr {
 				assert.Error(t, err)

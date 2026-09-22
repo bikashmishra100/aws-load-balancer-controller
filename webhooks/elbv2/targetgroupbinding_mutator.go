@@ -63,6 +63,10 @@ func (m *targetGroupBindingMutator) MutateCreate(ctx context.Context, obj runtim
 		m.metricsCollector.ObserveWebhookMutationError(apiPathMutateELBv2TargetGroupBinding, "checkTargetGroupArnOrName")
 		return nil, errors.Errorf("must provide either TargetGroupARN or TargetGroupName")
 	}
+	if err := validateRegionARNConsistency(tgb); err != nil {
+		m.metricsCollector.ObserveWebhookMutationError(apiPathMutateELBv2TargetGroupBinding, "validateRegionARNConsistency")
+		return nil, err
+	}
 	if err := m.getArnFromNameIfNeeded(ctx, tgb); err != nil {
 		m.metricsCollector.ObserveWebhookMutationError(apiPathMutateELBv2TargetGroupBinding, "getArnFromNameIfNeeded")
 		return nil, err

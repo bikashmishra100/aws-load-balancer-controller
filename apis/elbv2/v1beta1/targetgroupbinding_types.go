@@ -171,6 +171,11 @@ type TargetGroupBindingSpec struct {
 	// IAM Role ARN to assume when calling AWS APIs. Needed to assume a role in another account and prevent the confused deputy problem. https://docs.aws.amazon.com/IAM/latest/UserGuide/confused-deputy.html
 	// +optional
 	AssumeRoleExternalId string `json:"assumeRoleExternalId,omitempty"`
+
+	// Region is the AWS region of the target group. If unspecified, it defaults to the controller's region.
+	// Required when using TargetGroupName to reference a target group in a different region.
+	// +optional
+	Region string `json:"region,omitempty"`
 }
 
 // TargetGroupBindingStatus defines the observed state of TargetGroupBinding

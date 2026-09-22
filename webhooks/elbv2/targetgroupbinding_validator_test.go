@@ -547,7 +547,7 @@ func Test_targetGroupBindingValidator_ValidateCreate(t *testing.T) {
 			k8sClient := testclient.NewClientBuilder().WithScheme(k8sSchema).Build()
 			elbv2Client := services.NewMockELBV2(ctrl)
 			for _, call := range tt.fields.describeTargetGroupsAsListCalls {
-				elbv2Client.EXPECT().DescribeTargetGroupsAsList(gomock.Any(), call.req).Return(call.resp, call.err)
+				elbv2Client.EXPECT().DescribeTargetGroupsWithContext(gomock.Any(), call.req).Return(&elbv2sdk.DescribeTargetGroupsOutput{TargetGroups: call.resp}, call.err)
 				elbv2Client.EXPECT().AssumeRole(ctx, gomock.Any(), gomock.Any()).Return(elbv2Client, nil).AnyTimes()
 			}
 			mockMetricsCollector := lbcmetrics.NewMockCollector()
@@ -1756,7 +1756,7 @@ func Test_targetGroupBindingValidator_checkTargetGroupVpcID(t *testing.T) {
 			k8sClient := testclient.NewClientBuilder().WithScheme(k8sSchema).Build()
 			elbv2Client := services.NewMockELBV2(ctrl)
 			for _, call := range tt.fields.describeTargetGroupsAsListCalls {
-				elbv2Client.EXPECT().DescribeTargetGroupsAsList(gomock.Any(), call.req).Return(call.resp, call.err)
+				elbv2Client.EXPECT().DescribeTargetGroupsWithContext(gomock.Any(), call.req).Return(&elbv2sdk.DescribeTargetGroupsOutput{TargetGroups: call.resp}, call.err)
 				elbv2Client.EXPECT().AssumeRole(ctx, gomock.Any(), gomock.Any()).Return(elbv2Client, nil).AnyTimes()
 			}
 			mockMetricsCollector := lbcmetrics.NewMockCollector()
@@ -1781,6 +1781,70 @@ func Test_targetGroupBindingValidator_checkTargetGroupVpcID(t *testing.T) {
 				assert.EqualError(t, err, tt.wantErr.Error())
 			} else {
 				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestValidateRegionARNConsistency(t *testing.T) {
+	testCases := []struct {
+		name    string
+		tgb     *elbv2api.TargetGroupBinding
+		wantErr string
+	}{
+		{
+			name: "no spec.region set - always passes",
+			tgb: &elbv2api.TargetGroupBinding{
+				Spec: elbv2api.TargetGroupBindingSpec{
+					TargetGroupARN: "arn:aws:elasticloadbalancing:us-west-2:123456789012:targetgroup/my-tg/abc123",
+				},
+			},
+		},
+		{
+			name: "no targetGroupARN - always passes",
+			tgb: &elbv2api.TargetGroupBinding{
+				Spec: elbv2api.TargetGroupBindingSpec{
+					Region: "us-east-1",
+				},
+			},
+		},
+		{
+			name: "spec.region matches ARN region - passes",
+			tgb: &elbv2api.TargetGroupBinding{
+				Spec: elbv2api.TargetGroupBindingSpec{
+					Region:         "us-west-2",
+					TargetGroupARN: "arn:aws:elasticloadbalancing:us-west-2:123456789012:targetgroup/my-tg/abc123",
+				},
+			},
+		},
+		{
+			name: "spec.region mismatches ARN region - rejected",
+			tgb: &elbv2api.TargetGroupBinding{
+				Spec: elbv2api.TargetGroupBindingSpec{
+					Region:         "us-east-1",
+					TargetGroupARN: "arn:aws:elasticloadbalancing:us-west-2:123456789012:targetgroup/my-tg/abc123",
+				},
+			},
+			wantErr: `spec.region "us-east-1" does not match the region in targetGroupARN "arn:aws:elasticloadbalancing:us-west-2:123456789012:targetgroup/my-tg/abc123"`,
+		},
+		{
+			name: "non-standard ARN without region - passes (no region to compare)",
+			tgb: &elbv2api.TargetGroupBinding{
+				Spec: elbv2api.TargetGroupBindingSpec{
+					Region:         "us-east-1",
+					TargetGroupARN: "not-a-valid-arn",
+				},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateRegionARNConsistency(tc.tgb)
+			if tc.wantErr == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.EqualError(t, err, tc.wantErr)
 			}
 		})
 	}

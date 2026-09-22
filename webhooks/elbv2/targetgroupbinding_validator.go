@@ -13,6 +13,7 @@ import (
 	elbv2types "github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2/types"
 
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/go-logr/logr"
 	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -97,6 +98,14 @@ func (v *targetGroupBindingValidator) ValidateCreate(ctx context.Context, obj ru
 		v.metricsCollector.ObserveWebhookValidationError(apiPathValidateELBv2TargetGroupBinding, "checkAssumeRoleConfig")
 		return err
 	}
+	if err := v.checkCrossRegionConfig(tgb); err != nil {
+		v.metricsCollector.ObserveWebhookValidationError(apiPathValidateELBv2TargetGroupBinding, "checkCrossRegionConfig")
+		return err
+	}
+	if err := v.checkRegionARNConsistency(tgb); err != nil {
+		v.metricsCollector.ObserveWebhookValidationError(apiPathValidateELBv2TargetGroupBinding, "checkRegionARNConsistency")
+		return err
+	}
 
 	if err := v.checkTargetGroupProtocol(tgb, targetGroupCache); err != nil {
 		v.metricsCollector.ObserveWebhookValidationError(apiPathValidateELBv2TargetGroupBinding, "checkTargetGroupProtocol")
@@ -123,6 +132,14 @@ func (v *targetGroupBindingValidator) ValidateUpdate(ctx context.Context, obj ru
 	}
 	if err := v.checkAssumeRoleConfig(tgb); err != nil {
 		v.metricsCollector.ObserveWebhookValidationError(apiPathValidateELBv2TargetGroupBinding, "checkAssumeRoleConfig")
+		return err
+	}
+	if err := v.checkCrossRegionConfig(tgb); err != nil {
+		v.metricsCollector.ObserveWebhookValidationError(apiPathValidateELBv2TargetGroupBinding, "checkCrossRegionConfig")
+		return err
+	}
+	if err := v.checkRegionARNConsistency(tgb); err != nil {
+		v.metricsCollector.ObserveWebhookValidationError(apiPathValidateELBv2TargetGroupBinding, "checkRegionARNConsistency")
 		return err
 	}
 	if err := v.checkExistingTargetGroups(tgb); err != nil {
@@ -193,6 +210,9 @@ func (v *targetGroupBindingValidator) checkImmutableFields(tgb *elbv2api.TargetG
 		(oldTGB.Spec.VpcID != "" && tgb.Spec.VpcID == "") ||
 		(oldTGB.Spec.VpcID == "" && tgb.Spec.VpcID != "" && tgb.Spec.VpcID != v.vpcID) {
 		changedImmutableFields = append(changedImmutableFields, "spec.vpcID")
+	}
+	if tgb.Spec.Region != oldTGB.Spec.Region {
+		changedImmutableFields = append(changedImmutableFields, "spec.region")
 	}
 	if len(changedImmutableFields) != 0 {
 		return errors.Errorf("%s update may not change these immutable fields: %s", "TargetGroupBinding", strings.Join(changedImmutableFields, ","))
@@ -309,6 +329,25 @@ func (v *targetGroupBindingValidator) checkAssumeRoleConfig(tgb *elbv2api.Target
 	}
 
 	return nil
+}
+
+// checkCrossRegionConfig validates spec.region and rejects instance target type for cross-region TGBs.
+func (v *targetGroupBindingValidator) checkCrossRegionConfig(tgb *elbv2api.TargetGroupBinding) error {
+	if tgb.Spec.Region == "" {
+		return nil
+	}
+	if !smithyhttp.ValidHostLabel(tgb.Spec.Region) {
+		return errors.Errorf("spec.region %q is not a valid AWS region name", tgb.Spec.Region)
+	}
+	if tgb.Spec.TargetType != nil && *tgb.Spec.TargetType == elbv2api.TargetTypeInstance {
+		return errors.New("instance target type is not supported for cross-region TargetGroupBinding")
+	}
+	return nil
+}
+
+// checkRegionARNConsistency validates that spec.region matches the region embedded in the ARN when both are set.
+func (v *targetGroupBindingValidator) checkRegionARNConsistency(tgb *elbv2api.TargetGroupBinding) error {
+	return validateRegionARNConsistency(tgb)
 }
 
 // checkTargetGroupVpcID ensures Target Group Protocol matches with that on the AWS target group

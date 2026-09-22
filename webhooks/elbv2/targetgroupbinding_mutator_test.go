@@ -2,6 +2,7 @@ package elbv2
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -22,6 +23,22 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+// contextHavingRegion returns a gomock.Matcher that verifies the context
+// carries the expected region via services.WithRegion.
+type contextHavingRegion struct{ region string }
+
+func (m contextHavingRegion) Matches(x interface{}) bool {
+	ctx, ok := x.(context.Context)
+	if !ok {
+		return false
+	}
+	return services.RegionFromContext(ctx) == m.region
+}
+
+func (m contextHavingRegion) String() string {
+	return fmt.Sprintf("context with region %q", m.region)
+}
+
 func makeTargetGroupBinding(tgARN string) *elbv2api.TargetGroupBinding {
 	return &elbv2api.TargetGroupBinding{
 		ObjectMeta: metav1.ObjectMeta{
@@ -35,9 +52,10 @@ func makeTargetGroupBinding(tgARN string) *elbv2api.TargetGroupBinding {
 
 func Test_targetGroupBindingMutator_MutateCreate(t *testing.T) {
 	type describeTargetGroupsAsListCall struct {
-		req  *elbv2sdk.DescribeTargetGroupsInput
-		resp []elbv2types.TargetGroup
-		err  error
+		req        *elbv2sdk.DescribeTargetGroupsInput
+		resp       []elbv2types.TargetGroup
+		err        error
+		ctxMatcher gomock.Matcher // for AssumeRole context; nil defaults to exact ctx match
 	}
 
 	type fields struct {
@@ -381,6 +399,63 @@ func Test_targetGroupBindingMutator_MutateCreate(t *testing.T) {
 			wantErr:    errors.New("couldn't determine TargetGroup protocol: connection error"),
 			wantMetric: true,
 		},
+		{
+			name: "spec.region conflicts with region in targetGroupARN - rejected before AWS call",
+			fields: fields{
+				describeTargetGroupsAsListCalls: nil,
+			},
+			args: args{
+				obj: &elbv2api.TargetGroupBinding{
+					Spec: elbv2api.TargetGroupBindingSpec{
+						TargetGroupARN: "arn:aws:elasticloadbalancing:us-west-2:123456789012:targetgroup/my-tg/abc123",
+						Region:         "us-east-1",
+						TargetType:     &ipTargetType,
+					},
+				},
+			},
+			wantErr:    errors.New(`spec.region "us-east-1" does not match the region in targetGroupARN "arn:aws:elasticloadbalancing:us-west-2:123456789012:targetgroup/my-tg/abc123"`),
+			wantMetric: true,
+		},
+		{
+			name: "spec.region matches region in targetGroupARN - accepted",
+			fields: fields{
+				describeTargetGroupsAsListCalls: []describeTargetGroupsAsListCall{
+					{
+						req: &elbv2sdk.DescribeTargetGroupsInput{
+							TargetGroupArns: []string{"arn:aws:elasticloadbalancing:us-east-1:123456789012:targetgroup/my-tg/abc123"},
+						},
+						resp: []elbv2types.TargetGroup{
+							{
+								TargetGroupArn: awssdk.String("arn:aws:elasticloadbalancing:us-east-1:123456789012:targetgroup/my-tg/abc123"),
+								TargetType:     elbv2types.TargetTypeEnumIp,
+								Protocol:       elbv2types.ProtocolEnumHttp,
+								VpcId:          awssdk.String("vpc-123"),
+							},
+						},
+						ctxMatcher: contextHavingRegion{region: "us-east-1"},
+					},
+				},
+			},
+			args: args{
+				obj: &elbv2api.TargetGroupBinding{
+					Spec: elbv2api.TargetGroupBindingSpec{
+						TargetGroupARN: "arn:aws:elasticloadbalancing:us-east-1:123456789012:targetgroup/my-tg/abc123",
+						Region:         "us-east-1",
+						TargetType:     &ipTargetType,
+					},
+				},
+			},
+			want: &elbv2api.TargetGroupBinding{
+				Spec: elbv2api.TargetGroupBindingSpec{
+					TargetGroupARN:      "arn:aws:elasticloadbalancing:us-east-1:123456789012:targetgroup/my-tg/abc123",
+					Region:              "us-east-1",
+					TargetType:          &ipTargetType,
+					IPAddressType:       &targetGroupIPAddressTypeIPv4,
+					VpcID:               "vpc-123",
+					TargetGroupProtocol: &httpProtocol,
+				},
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -389,8 +464,12 @@ func Test_targetGroupBindingMutator_MutateCreate(t *testing.T) {
 			elbv2Client := services.NewMockELBV2(ctrl)
 			ctx := context.Background()
 			for _, call := range tt.fields.describeTargetGroupsAsListCalls {
-				elbv2Client.EXPECT().DescribeTargetGroupsAsList(gomock.Any(), call.req).Return(call.resp, call.err).AnyTimes()
-				elbv2Client.EXPECT().AssumeRole(ctx, gomock.Any(), gomock.Any()).Return(elbv2Client, nil).AnyTimes()
+				elbv2Client.EXPECT().DescribeTargetGroupsWithContext(gomock.Any(), call.req).Return(&elbv2sdk.DescribeTargetGroupsOutput{TargetGroups: call.resp}, call.err).AnyTimes()
+				assumeRoleCtxMatcher := gomock.Matcher(gomock.Eq(ctx))
+				if call.ctxMatcher != nil {
+					assumeRoleCtxMatcher = call.ctxMatcher
+				}
+				elbv2Client.EXPECT().AssumeRole(assumeRoleCtxMatcher, gomock.Any(), gomock.Any()).Return(elbv2Client, nil).AnyTimes()
 			}
 			mockMetricsCollector := lbcmetrics.NewMockCollector()
 			m := &targetGroupBindingMutator{
@@ -501,7 +580,7 @@ func Test_targetGroupBindingMutator_obtainSDKTargetTypeFromAWS(t *testing.T) {
 			defer ctrl.Finish()
 			elbv2Client := services.NewMockELBV2(ctrl)
 			for _, call := range tt.fields.describeTargetGroupsAsListCalls {
-				elbv2Client.EXPECT().DescribeTargetGroupsAsList(gomock.Any(), call.req).Return(call.resp, call.err)
+				elbv2Client.EXPECT().DescribeTargetGroupsWithContext(gomock.Any(), call.req).Return(&elbv2sdk.DescribeTargetGroupsOutput{TargetGroups: call.resp}, call.err)
 				elbv2Client.EXPECT().AssumeRole(ctx, gomock.Any(), gomock.Any()).Return(elbv2Client, nil).AnyTimes()
 			}
 			mockMetricsCollector := lbcmetrics.NewMockCollector()
@@ -642,7 +721,7 @@ func Test_targetGroupBindingMutator_getIPAddressTypeFromAWS(t *testing.T) {
 			defer ctrl.Finish()
 			elbv2Client := services.NewMockELBV2(ctrl)
 			for _, call := range tt.fields.describeTargetGroupsAsListCalls {
-				elbv2Client.EXPECT().DescribeTargetGroupsAsList(gomock.Any(), call.req).Return(call.resp, call.err)
+				elbv2Client.EXPECT().DescribeTargetGroupsWithContext(gomock.Any(), call.req).Return(&elbv2sdk.DescribeTargetGroupsOutput{TargetGroups: call.resp}, call.err)
 				elbv2Client.EXPECT().AssumeRole(ctx, gomock.Any(), gomock.Any()).Return(elbv2Client, nil).AnyTimes()
 			}
 
@@ -738,7 +817,7 @@ func Test_targetGroupBindingMutator_obtainSDKVpcIDFromAWS(t *testing.T) {
 			defer ctrl.Finish()
 			elbv2Client := services.NewMockELBV2(ctrl)
 			for _, call := range tt.fields.describeTargetGroupsAsListCalls {
-				elbv2Client.EXPECT().DescribeTargetGroupsAsList(gomock.Any(), call.req).Return(call.resp, call.err)
+				elbv2Client.EXPECT().DescribeTargetGroupsWithContext(gomock.Any(), call.req).Return(&elbv2sdk.DescribeTargetGroupsOutput{TargetGroups: call.resp}, call.err)
 				elbv2Client.EXPECT().AssumeRole(ctx, gomock.Any(), gomock.Any()).Return(elbv2Client, nil).AnyTimes()
 			}
 			mockMetricsCollector := lbcmetrics.NewMockCollector()
