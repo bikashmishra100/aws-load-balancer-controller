@@ -235,6 +235,83 @@ Add the following permission to the AWS Load Balancer Controller's IAM role. Thi
 ```
 
 
+## Cross-Region TargetGroup
+
+Use this feature when the TargetGroup resides in a different AWS region than where your EKS cluster runs.
+
+**Spec field:**
+* `region`: The AWS region of the TargetGroup. Defaults to the controller's region when not specified. Required when using `targetGroupName` to reference a TargetGroup in a different region, since names are not globally unique. Immutable after creation.
+
+**Region resolution priority** (highest to lowest):
+1. `spec.region` — explicit override
+2. Region parsed from `spec.targetGroupARN` — used automatically when only an ARN is provided
+3. Controller's own region — the default fallback
+
+**Constraints:**
+- `instance` TargetType is **not supported** for cross-region TargetGroupBindings. Use `ip` TargetType instead.
+- `spec.region` is immutable after creation.
+- If both `spec.region` and `spec.targetGroupARN` are set, the region in the ARN must match `spec.region`.
+
+### Sample YAML
+
+Using an ARN (region is inferred automatically from the ARN):
+```yaml
+apiVersion: elbv2.k8s.aws/v1beta1
+kind: TargetGroupBinding
+metadata:
+  name: cross-region-tgb
+spec:
+  serviceRef:
+    name: awesome-service
+    port: 80
+  targetGroupARN: arn:aws:elasticloadbalancing:us-east-1:123456789012:targetgroup/my-tg/abcdef1234567890
+```
+
+Using a TargetGroup name with an explicit region:
+```yaml
+apiVersion: elbv2.k8s.aws/v1beta1
+kind: TargetGroupBinding
+metadata:
+  name: cross-region-tgb
+spec:
+  serviceRef:
+    name: awesome-service
+    port: 80
+  targetGroupName: my-tg
+  region: us-east-1
+```
+
+Cross-region combined with cross-account (AssumeRole) — implicit region from ARN:
+```yaml
+apiVersion: elbv2.k8s.aws/v1beta1
+kind: TargetGroupBinding
+metadata:
+  name: cross-region-cross-account-tgb
+spec:
+  serviceRef:
+    name: awesome-service
+    port: 80
+  targetGroupARN: arn:aws:elasticloadbalancing:us-east-1:155642222660:targetgroup/my-tg/abcdef1234567890
+  iamRoleArnToAssume: arn:aws:iam::155642222660:role/tg-management-role
+  assumeRoleExternalId: very-secret-string
+```
+
+Cross-region combined with cross-account (AssumeRole) — explicit region with TargetGroup name:
+```yaml
+apiVersion: elbv2.k8s.aws/v1beta1
+kind: TargetGroupBinding
+metadata:
+  name: cross-region-cross-account-tgb
+spec:
+  serviceRef:
+    name: awesome-service
+    port: 80
+  targetGroupName: my-tg
+  region: us-east-1
+  iamRoleArnToAssume: arn:aws:iam::155642222660:role/tg-management-role
+  assumeRoleExternalId: very-secret-string
+```
+
 ## MultiCluster TargetGroup
 TargetGroupBinding CR supports sharing the same TargetGroup ARN among multiple TargetGroupBindings. Setting this flag allows
 TargetGroup ARNs among multiple clusters or services within the same cluster.
